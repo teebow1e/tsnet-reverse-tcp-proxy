@@ -1,10 +1,21 @@
 package main
 
 import (
+	"flag"
 	"io"
 	"log"
 	"net"
 	"os"
+	"os/signal"
+	"syscall"
+
+	"tailscale.com/tsnet"
+)
+
+var (
+	listeningAddr   = flag.String("l", ":1337", "Listening address")
+	destinationAddr = flag.String("dst", "", "Destination address to be forwarded to")
+	hostname        = flag.String("hn", "tsnet-revproxy", "Hostname to use on the tailnet")
 )
 
 func handleConnection(src net.Conn, dstAddress string) {
@@ -21,17 +32,35 @@ func handleConnection(src net.Conn, dstAddress string) {
 }
 
 func main() {
-	if len(os.Args) < 3 {
-		log.Fatalf("Usage: %s [local address:port] [destination address:port]", os.Args[0])
+	flag.Parse()
+
+	if *destinationAddr == "" {
+		log.Fatalln("destination address not specified, the program will quit.")
 	}
 
-	listener, err := net.Listen("tcp", os.Args[1])
+	tsnetServer := new(tsnet.Server)
+	tsnetServer.Hostname = *hostname
+	tsnetServer.Ephemeral = true // ephemeral = remove from tailnet after inactivity period
+	defer tsnetServer.Close()
+
+	listener, err := tsnetServer.Listen("tcp", *listeningAddr)
 	if err != nil {
 		log.Fatalf("Failed to bind to address: %v", err)
 	}
 	defer listener.Close()
 
-	log.Printf("Proxy listening on %s, forwarding to %s", os.Args[1], os.Args[2])
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sig
+		log.Println("Shutting down gracefully...")
+		listener.Close()
+		tsnetServer.Close()
+		os.Exit(0)
+	}()
+
+	log.Printf("Proxy listening on %s, forwarding to %s", *listeningAddr, *destinationAddr)
 
 	for {
 		conn, err := listener.Accept()
@@ -41,6 +70,6 @@ func main() {
 		}
 		log.Printf("Accepted connection from %v, starting proxying...", conn.RemoteAddr().String())
 
-		go handleConnection(conn, os.Args[2])
+		go handleConnection(conn, *destinationAddr)
 	}
 }
